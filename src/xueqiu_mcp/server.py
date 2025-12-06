@@ -1,4 +1,6 @@
 import os
+import time
+import threading
 import pysnowball as ball
 from fastmcp import FastMCP
 from dotenv import load_dotenv
@@ -11,6 +13,39 @@ load_dotenv()
 _token = os.getenv("XUEQIU_TOKEN")
 if _token:
     ball.set_token(_token)
+
+
+# 请求频率限制器，防止被雪球服务器限流
+class RateLimiter:
+    """简单的请求频率限制器，确保请求之间有最小间隔"""
+    
+    def __init__(self, min_interval: float = 1.0):
+        """
+        Args:
+            min_interval: 请求之间的最小间隔（秒）
+        """
+        self.min_interval = min_interval
+        self.last_request_time = 0.0
+        self._lock = threading.Lock()
+    
+    def wait(self):
+        """等待直到可以发起下一个请求"""
+        with self._lock:
+            current_time = time.time()
+            elapsed = current_time - self.last_request_time
+            if elapsed < self.min_interval:
+                time.sleep(self.min_interval - elapsed)
+            self.last_request_time = time.time()
+
+
+# 全局限流器，每次请求间隔至少 1.5 秒
+_rate_limiter = RateLimiter(min_interval=1.5)
+
+
+def rate_limited_call(func, *args, **kwargs):
+    """带限流的 API 调用包装函数"""
+    _rate_limiter.wait()
+    return func(*args, **kwargs)
 
 mcp = FastMCP(
     name="Snowball MCP",
@@ -91,21 +126,21 @@ def process_data(data, process_config=None):
 @mcp.tool()
 def quotec(stock_code: str="SZ000002") -> dict:
     """获取某支股票的行情数据"""
-    result = ball.quotec(stock_code)
+    result = rate_limited_call(ball.quotec, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def quote_detail(stock_code: str="SZ000002") -> dict:
     """获取某支股票的行情数据-详细"""
-    result = ball.quote_detail(stock_code)
+    result = rate_limited_call(ball.quote_detail, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def pankou(stock_code: str="SZ000002") -> dict:
     """获取实时分笔数据，可以实时取得股票当前报价和成交信息"""
-    result = ball.pankou(stock_code)
+    result = rate_limited_call(ball.pankou, stock_code)
     return process_data(result)
 
 
@@ -119,56 +154,56 @@ def kline(stock_code: str="SZ000002", period: str = "day", count: int = 284) -> 
                 120m（120分钟）、60m（60分钟）、30m（30分钟）、15m（15分钟）、5m（5分钟）、1m（1分钟）
         count: 返回数据数量，默认284条
     """
-    result = ball.kline(stock_code, period=period, count=count)
+    result = rate_limited_call(ball.kline, stock_code, period=period, count=count)
     return process_data(result)
 
 
 @mcp.tool()
 def earningforecast(stock_code: str="SZ000002") -> dict:
     """按年度获取业绩预告数据"""
-    result = ball.earningforecast(stock_code)
+    result = rate_limited_call(ball.earningforecast, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def report(stock_code: str="SZ000002") -> dict:
     """获取机构评级数据"""
-    result = ball.report(stock_code)
+    result = rate_limited_call(ball.report, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def capital_flow(stock_code: str="SZ000002") -> dict:
     """获取当日资金流如流出数据，每分钟数据"""
-    result = ball.capital_flow(stock_code)
+    result = rate_limited_call(ball.capital_flow, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def capital_history(stock_code: str="SZ000002") -> dict:
     """获取历史资金流如流出数据，每日数据"""
-    result = ball.capital_history(stock_code)
+    result = rate_limited_call(ball.capital_history, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def capital_assort(stock_code: str="SZ000002") -> dict:
     """获取资金成交分布数据"""
-    result = ball.capital_assort(stock_code)
+    result = rate_limited_call(ball.capital_assort, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def blocktrans(stock_code: str="SZ000002") -> dict:
     """获取大宗交易数据"""
-    result = ball.blocktrans(stock_code)
+    result = rate_limited_call(ball.blocktrans, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def margin(stock_code: str="SZ000002") -> dict:
     """获取融资融券数据"""
-    result = ball.margin(stock_code)
+    result = rate_limited_call(ball.margin, stock_code)
     return process_data(result)
 
 
@@ -181,7 +216,7 @@ def indicator(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) ->
         is_annals: 只获取年报,默认为1
         count: 返回数据数量,默认5条
     """
-    result = ball.indicator(symbol=stock_code, is_annals=is_annals, count=count)
+    result = rate_limited_call(ball.indicator, symbol=stock_code, is_annals=is_annals, count=count)
     return process_data(result)
 
 
@@ -194,7 +229,7 @@ def income(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) -> di
         is_annals: 只获取年报,默认为1
         count: 返回数据数量,默认5条
     """
-    result = ball.income(symbol=stock_code, is_annals=is_annals, count=count)
+    result = rate_limited_call(ball.income, symbol=stock_code, is_annals=is_annals, count=count)
     return process_data(result)
 
 
@@ -207,7 +242,7 @@ def balance(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) -> d
         is_annals: 只获取年报,默认为1
         count: 返回数据数量,默认5条
     """
-    result = ball.balance(symbol=stock_code, is_annals=is_annals, count=count)
+    result = rate_limited_call(ball.balance, symbol=stock_code, is_annals=is_annals, count=count)
     return process_data(result)
 
 
@@ -220,7 +255,7 @@ def cash_flow(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) ->
         is_annals: 只获取年报,默认为1
         count: 返回数据数量,默认5条
     """
-    result = ball.cash_flow(symbol=stock_code, is_annals=is_annals, count=count)
+    result = rate_limited_call(ball.cash_flow, symbol=stock_code, is_annals=is_annals, count=count)
     return process_data(result)
 
 
@@ -232,7 +267,7 @@ def business(stock_code: str="SZ000002", count: int = 5) -> dict:
         stock_code: 股票代码
         count: 返回数据数量,默认5条
     """
-    result = ball.business(symbol=stock_code, count=count)
+    result = rate_limited_call(ball.business, symbol=stock_code, count=count)
     return process_data(result)
 
 
@@ -244,28 +279,28 @@ def top_holders(stock_code: str="SZ000002", circula: int = 1) -> dict:
         stock_code: 股票代码
         circula: 只获取流通股,默认为1
     """
-    result = ball.top_holders(symbol=stock_code, circula=circula)
+    result = rate_limited_call(ball.top_holders, symbol=stock_code, circula=circula)
     return process_data(result)
 
 
 @mcp.tool()
 def main_indicator(stock_code: str="SZ000002") -> dict:
     """获取F10主要指标数据"""
-    result = ball.main_indicator(stock_code)
+    result = rate_limited_call(ball.main_indicator, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def holders(stock_code: str="SZ000002") -> dict:
     """获取F10股东人数数据"""
-    result = ball.holders(stock_code)
+    result = rate_limited_call(ball.holders, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def org_holding_change(stock_code: str="SZ000002") -> dict:
     """获取F10机构持仓数据"""
-    result = ball.org_holding_change(stock_code)
+    result = rate_limited_call(ball.org_holding_change, stock_code)
     return process_data(result)
 
 
@@ -278,21 +313,21 @@ def bonus(stock_code: str="SZ000002", page: int = 1, size: int = 10) -> dict:
         page: 第几页 默认1
         size: 每页含有多少数据 默认10
     """
-    result = ball.bonus(stock_code, page=page, size=size)
+    result = rate_limited_call(ball.bonus, stock_code, page=page, size=size)
     return process_data(result)
 
 
 @mcp.tool()
 def industry_compare(stock_code: str="SZ000002") -> dict:
     """获取F10行业对比数据"""
-    result = ball.industry_compare(stock_code)
+    result = rate_limited_call(ball.industry_compare, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
 def watch_list() -> dict:
     """获取用户自选列表"""
-    result = ball.watch_list()
+    result = rate_limited_call(ball.watch_list)
     return process_data(result)
 
 
@@ -303,7 +338,7 @@ def watch_stock(pid: int) -> dict:
     Args:
         pid: 自选列表ID
     """
-    result = ball.watch_stock(pid)
+    result = rate_limited_call(ball.watch_stock, pid)
     return process_data(result)
 
 
@@ -314,7 +349,7 @@ def nav_daily(cube_symbol: str="SZ000002") -> dict:
     Args:
         cube_symbol: 组合代码
     """
-    result = ball.nav_daily(cube_symbol)
+    result = rate_limited_call(ball.nav_daily, cube_symbol)
     return process_data(result)
 
 
@@ -325,7 +360,7 @@ def rebalancing_history(cube_symbol: str="SZ000002") -> dict:
     Args:
         cube_symbol: 组合代码
     """
-    result = ball.rebalancing_history(cube_symbol)
+    result = rate_limited_call(ball.rebalancing_history, cube_symbol)
     return process_data(result)
 
 
@@ -337,7 +372,7 @@ def convertible_bond(page_size: int = 5, page_count: int = 1) -> dict:
         page_size: 每页显示数量
         page_count: 页码
     """
-    result = ball.convertible_bond(page_size=page_size, page_count=page_count)
+    result = rate_limited_call(ball.convertible_bond, page_size=page_size, page_count=page_count)
     return process_data(result)
 
 
@@ -348,7 +383,7 @@ def index_basic_info(index_code: str="SZ000002") -> dict:
     Args:
         index_code: 指数代码
     """
-    result = ball.index_basic_info(index_code)
+    result = rate_limited_call(ball.index_basic_info, index_code)
     return process_data(result)
 
 
@@ -359,7 +394,7 @@ def index_details_data(index_code: str="SZ000002") -> dict:
     Args:
         index_code: 指数代码
     """
-    result = ball.index_details_data(index_code)
+    result = rate_limited_call(ball.index_details_data, index_code)
     return process_data(result)
 
 
@@ -370,7 +405,7 @@ def index_weight_top10(index_code: str="SZ000002") -> dict:
     Args:
         index_code: 指数代码
     """
-    result = ball.index_weight_top10(index_code)
+    result = rate_limited_call(ball.index_weight_top10, index_code)
     return process_data(result)
 
 
@@ -381,7 +416,7 @@ def index_perf_7(index_code: str="SZ000002") -> dict:
     Args:
         index_code: 指数代码
     """
-    result = ball.index_perf_7(index_code)
+    result = rate_limited_call(ball.index_perf_7, index_code)
     return process_data(result)
 
 
@@ -392,7 +427,7 @@ def index_perf_30(index_code: str="SZ000002") -> dict:
     Args:
         index_code: 指数代码
     """
-    result = ball.index_perf_30(index_code)
+    result = rate_limited_call(ball.index_perf_30, index_code)
     return process_data(result)
 
 
@@ -403,7 +438,7 @@ def index_perf_90(index_code: str="SZ000002") -> dict:
     Args:
         index_code: 指数代码
     """
-    result = ball.index_perf_90(index_code)
+    result = rate_limited_call(ball.index_perf_90, index_code)
     return process_data(result)
 
 
@@ -414,7 +449,7 @@ def northbound_shareholding_sh(date: str = None) -> dict:
     Args:
         date: 日期，默认当天，格式：'2022/01/19'
     """
-    result = ball.northbound_shareholding_sh(date)
+    result = rate_limited_call(ball.northbound_shareholding_sh, date)
     return process_data(result)
 
 
@@ -425,7 +460,7 @@ def northbound_shareholding_sz(date: str = None) -> dict:
     Args:
         date: 日期，默认当天，格式：'2022/01/19'
     """
-    result = ball.northbound_shareholding_sz(date)
+    result = rate_limited_call(ball.northbound_shareholding_sz, date)
     return process_data(result)
 
 
@@ -436,7 +471,7 @@ def fund_detail(fund_code: str) -> dict:
     Args:
         fund_code: 基金代码
     """
-    result = ball.fund_detail(fund_code)
+    result = rate_limited_call(ball.fund_detail, fund_code)
     return process_data(result)
 
 
@@ -447,7 +482,7 @@ def fund_info(fund_code: str="SZ000002") -> dict:
     Args:
         fund_code: 基金代码
     """
-    result = ball.fund_info(fund_code)
+    result = rate_limited_call(ball.fund_info, fund_code)
     return process_data(result)
 
 
@@ -458,7 +493,7 @@ def fund_growth(fund_code: str="SZ000002") -> dict:
     Args:
         fund_code: 基金代码
     """
-    result = ball.fund_growth(fund_code)
+    result = rate_limited_call(ball.fund_growth, fund_code)
     return process_data(result)
 
 
@@ -469,7 +504,7 @@ def fund_nav_history(fund_code: str="SZ000002") -> dict:
     Args:
         fund_code: 基金代码
     """
-    result = ball.fund_nav_history(fund_code)
+    result = rate_limited_call(ball.fund_nav_history, fund_code)
     return process_data(result)
 
 
@@ -480,7 +515,7 @@ def fund_achievement(fund_code: str="SZ000002") -> dict:
     Args:
         fund_code: 基金代码
     """
-    result = ball.fund_achievement(fund_code)
+    result = rate_limited_call(ball.fund_achievement, fund_code)
     return process_data(result)
 
 
@@ -491,7 +526,7 @@ def fund_asset(fund_code: str="SZ000002") -> dict:
     Args:
         fund_code: 基金代码
     """
-    result = ball.fund_asset(fund_code)
+    result = rate_limited_call(ball.fund_asset, fund_code)
     return process_data(result)
 
 
@@ -502,7 +537,7 @@ def fund_manager(fund_code: str="SZ000002") -> dict:
     Args:
         fund_code: 基金代码
     """
-    result = ball.fund_manager(fund_code)
+    result = rate_limited_call(ball.fund_manager, fund_code)
     return process_data(result)
 
 
@@ -513,7 +548,7 @@ def fund_trade_date(fund_code: str="SZ000002") -> dict:
     Args:
         fund_code: 基金代码
     """
-    result = ball.fund_trade_date(fund_code)
+    result = rate_limited_call(ball.fund_trade_date, fund_code)
     return process_data(result)
 
 
@@ -524,7 +559,7 @@ def fund_derived(fund_code: str="SZ000002") -> dict:
     Args:
         fund_code: 基金代码
     """
-    result = ball.fund_derived(fund_code)
+    result = rate_limited_call(ball.fund_derived, fund_code)
     return process_data(result)
 
 
@@ -535,5 +570,5 @@ def suggest_stock(keyword: str="SZ000002") -> dict:
     Args:
         keyword: 关键词
     """
-    result = ball.suggest_stock(keyword)
+    result = rate_limited_call(ball.suggest_stock, keyword)
     return process_data(result)
