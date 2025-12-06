@@ -6,9 +6,36 @@ import datetime
 import json
 
 load_dotenv()
-ball.set_token(os.getenv("XUEQIU_TOKEN"))
 
-mcp = FastMCP(name="Xueqiu MCP")
+# 延迟设置 token，允许服务启动时 token 为空
+_token = os.getenv("XUEQIU_TOKEN")
+if _token:
+    ball.set_token(_token)
+
+mcp = FastMCP(
+    name="Snowball MCP",
+    instructions="""你是一个中国股票市场数据助手，通过雪球(Xueqiu/Snowball)API获取股票、基金、指数等金融数据。
+
+## 股票代码格式
+- A股：SZ000002（深圳）、SH600000（上海）
+- 港股：HK00700
+- 美股：AAPL、GOOGL
+
+## 常用功能
+- 实时行情：quotec, quote_detail, pankou
+- K线数据：kline（支持日/周/月/分钟级别）
+- 财务数据：income（利润表）、balance（资产负债表）、cash_flow（现金流量表）
+- 资金流向：capital_flow, capital_history
+- 指数数据：index_basic_info, index_weight_top10
+- 基金数据：fund_detail, fund_nav_history
+- 北向资金：northbound_shareholding_sh, northbound_shareholding_sz
+- 搜索股票：suggest_stock
+
+## 注意事项
+- 使用前需确保 XUEQIU_TOKEN 环境变量已正确设置
+- 数据来源于雪球，仅供参考，不构成投资建议
+"""
+)
 
 
 def convert_timestamps(data):
