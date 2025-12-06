@@ -83,9 +83,16 @@ def pankou(stock_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def kline(stock_code: str="SZ000002", days: int = 100) -> dict:
-    """获取K线数据。第二参数可制定从现在到N天前，默认100"""
-    result = ball.kline(stock_code, days)
+def kline(stock_code: str="SZ000002", period: str = "day", count: int = 284) -> dict:
+    """获取K线数据
+    
+    Args:
+        stock_code: 股票代码，例如 SZ000002
+        period: K线周期，可选值：day（日线）、week（周线）、month（月线）、quarter（季线）、year（年线）、
+                120m（120分钟）、60m（60分钟）、30m（30分钟）、15m（15分钟）、5m（5分钟）、1m（1分钟）
+        count: 返回数据数量，默认284条
+    """
+    result = ball.kline(stock_code, period=period, count=count)
     return process_data(result)
 
 
@@ -503,8 +510,3 @@ def suggest_stock(keyword: str="SZ000002") -> dict:
     """
     result = ball.suggest_stock(keyword)
     return process_data(result)
-
-
-if __name__ == "__main__":
-    # This code only runs when the file is executed directly
-    mcp.run()
