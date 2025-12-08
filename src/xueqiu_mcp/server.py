@@ -9,23 +9,130 @@ import json
 
 load_dotenv()
 
-# 延迟设置 token，允许服务启动时 token 为空
-_token = os.getenv("XUEQIU_TOKEN")
-if _token:
-    ball.set_token(_token)
+
+# ==================== Token 轮换管理器 ====================
+
+class TokenRotator:
+    """多 Token 轮换管理器
+    
+    机制：
+    1. 支持多个 Token（逗号分隔或多个环境变量）
+    2. 轮换使用 Token（Round-Robin）
+    3. 仅当有多个 Token 时，失败的 Token 才会临时禁用
+    """
+    
+    def __init__(self, cooldown_seconds: float = 60.0, max_failures: int = 3):
+        self.tokens = []
+        self.current_index = 0
+        self.cooldown_seconds = cooldown_seconds
+        self.max_failures = max_failures
+        self.token_status = {}  # {token: {'failures': int, 'disabled_until': float}}
+        self._lock = threading.Lock()
+        self._load_tokens()
+    
+    def _load_tokens(self):
+        """从环境变量加载 Token"""
+        # 方式1: 逗号分隔的单一变量
+        tokens_str = os.getenv("XUEQIU_TOKEN", "")
+        if ',' in tokens_str:
+            self.tokens = [t.strip() for t in tokens_str.split(',') if t.strip()]
+        elif tokens_str:
+            self.tokens = [tokens_str]
+        
+        # 方式2: 多个变量 XUEQIU_TOKEN_1, XUEQIU_TOKEN_2 ...
+        for i in range(1, 10):
+            token = os.getenv(f"XUEQIU_TOKEN_{i}")
+            if token and token not in self.tokens:
+                self.tokens.append(token)
+        
+        # 初始化状态
+        for token in self.tokens:
+            self.token_status[token] = {'failures': 0, 'disabled_until': 0.0}
+        
+        if self.tokens:
+            print(f"[TokenRotator] 已加载 {len(self.tokens)} 个 Token")
+        else:
+            print("[TokenRotator] 警告: 未配置任何 Token，部分功能将不可用")
+    
+    def get_next_token(self) -> str | None:
+        """获取下一个可用的 Token"""
+        if not self.tokens:
+            return None
+        
+        with self._lock:
+            current_time = time.time()
+            
+            # 如果只有一个 Token，直接返回，不做禁用检查
+            if len(self.tokens) == 1:
+                return self.tokens[0]
+            
+            # 多个 Token 时，查找可用的
+            for _ in range(len(self.tokens)):
+                token = self.tokens[self.current_index]
+                status = self.token_status[token]
+                
+                # 检查是否在冷却期
+                if current_time >= status['disabled_until']:
+                    # 可用，移动到下一个索引
+                    self.current_index = (self.current_index + 1) % len(self.tokens)
+                    return token
+                
+                # 当前 Token 不可用，尝试下一个
+                self.current_index = (self.current_index + 1) % len(self.tokens)
+            
+            # 所有 Token 都在冷却期，返回第一个（强制使用）
+            print("[TokenRotator] 所有 Token 都在冷却期，强制使用第一个")
+            return self.tokens[0]
+    
+    def report_failure(self, token: str):
+        """报告 Token 失败"""
+        if not token or token not in self.token_status:
+            return
+        
+        with self._lock:
+            # 只有多个 Token 时才禁用
+            if len(self.tokens) <= 1:
+                return
+            
+            status = self.token_status[token]
+            status['failures'] += 1
+            
+            if status['failures'] >= self.max_failures:
+                status['disabled_until'] = time.time() + self.cooldown_seconds
+                print(f"[TokenRotator] Token 连续失败 {status['failures']} 次，禁用 {self.cooldown_seconds} 秒")
+    
+    def report_success(self, token: str):
+        """报告 Token 成功，重置失败计数"""
+        if not token or token not in self.token_status:
+            return
+        
+        with self._lock:
+            self.token_status[token]['failures'] = 0
+    
+    def apply_token(self) -> str | None:
+        """获取下一个 Token 并应用到 pysnowball"""
+        token = self.get_next_token()
+        if token:
+            ball.set_token(token)
+        return token
 
 
-# 自适应请求频率限制器
+# 全局 Token 轮换器
+_token_rotator = TokenRotator(cooldown_seconds=60.0, max_failures=3)
+
+
+# ==================== 自适应请求频率限制器 ====================
+
 class AdaptiveRateLimiter:
     """自适应请求频率限制器
     
     机制：
-    1. 初始间隔为 min_interval (默认1.0s)
-    2. 遇到错误时，调用 backoff() 增加间隔 (x1.2)，最大不超过 max_interval (5.0s)
+    1. 初始间隔为 min_interval (默认1.5s)
+    2. 遇到错误时，调用 backoff() 增加间隔 (x1.2)，最大不超过 max_interval (8.0s)
     3. 如果一段时间 (recovery_timeout) 没有请求，自动恢复到 min_interval
     """
     
-    def __init__(self, min_interval: float = 1.0, max_interval: float = 5.0, recovery_timeout: float = 30.0):
+    def __init__(self, min_interval: float = 1.5, max_interval: float = 8.0, recovery_timeout: float = 60.0):
         self.min_interval = min_interval
         self.max_interval = max_interval
         self.current_interval = min_interval
@@ -44,7 +151,6 @@ class AdaptiveRateLimiter:
                 self.current_interval = self.min_interval
             
             # 计算需要等待的时间
-            # 注意：这里的 elapsed 应该基于 interval 计算
             if time_since_last < self.current_interval:
                 sleep_time = self.current_interval - time_since_last
                 time.sleep(sleep_time)
@@ -58,31 +164,51 @@ class AdaptiveRateLimiter:
             print(f"[RateLimit] 触发限流退避，当前间隔: {self.current_interval:.2f}s")
 
 
-# 全局自适应限流器
-_rate_limiter = AdaptiveRateLimiter(min_interval=1.0, max_interval=5.0, recovery_timeout=30.0)
+# 全局自适应限流器（增加了间隔时间）
+_rate_limiter = AdaptiveRateLimiter(min_interval=1.5, max_interval=8.0, recovery_timeout=60.0)
 
 
 def rate_limited_call(func, *args, **kwargs):
-    """带限流的 API 调用包装函数，包含错误处理、自适应退避和自动重试"""
+    """带限流的 API 调用包装函数，包含 Token 轮换、错误处理和自动重试"""
     _rate_limiter.wait()
+    
+    # 应用下一个可用 Token
+    current_token = _token_rotator.apply_token()
+    
     try:
-        return func(*args, **kwargs)
+        result = func(*args, **kwargs)
+        # 成功时报告
+        if current_token:
+            _token_rotator.report_success(current_token)
+        return result
     except Exception as e:
         # 遇到异常，触发退避
         _rate_limiter.backoff()
         
-        # 打印日志（可选）
+        # 报告 Token 失败
+        if current_token:
+            _token_rotator.report_failure(current_token)
+        
+        # 打印日志
         print(f"[Retry] 请求失败: {e}，将在 2 秒后重试...")
         
         # 重试机制：等待 2 秒后重试一次
         time.sleep(2.0)
+        
+        # 尝试使用下一个 Token
+        retry_token = _token_rotator.apply_token()
+        
         try:
-            # 重试前再次检查限流（虽然 sleep 2s 已经足够，但为了保持逻辑一致性，且避免重试请求冲击）
-            # 或者这里可以直接调用，因为已经手动 sleep 了 2s，且触发了 backoff
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            if retry_token:
+                _token_rotator.report_success(retry_token)
+            return result
         except Exception as retry_e:
-            # 重试依然失败，处理异常
-            e = retry_e # 使用最后一次的异常
+            # 重试依然失败
+            if retry_token:
+                _token_rotator.report_failure(retry_token)
+            
+            e = retry_e
             
             # 处理 pysnowball 抛出的异常，通常是 bytes 类型的响应内容
             if hasattr(e, 'args') and e.args and isinstance(e.args[0], bytes):
@@ -92,13 +218,15 @@ def rate_limited_call(func, *args, **kwargs):
                     if error_data.get('error_code') == '400016' or \
                        '重新登录' in error_data.get('error_description', ''):
                         raise ValueError(
-                            "Snowball API Token 已失效或过期。\n"
-                            "请重新获取新的 Token 并更新 XUEQIU_TOKEN 环境变量。\n"
-                            "获取方法请参考: https://github.com/uname-yang/pysnowball/blob/master/how_to_get_token.md"
+                            "🔴 雪球 API Token 失效 (错误码: 400016)\n"
+                            "错误信息: 遇到错误，请刷新页面或者重新登录帐号后再试\n"
+                            "解决方案: 请更新 XUEQIU_TOKEN 环境变量\n"
+                            "获取方式: https://github.com/uname-yang/pysnowball/blob/master/how_to_get_token.md"
                         )
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     pass
             raise e
+
 
 mcp = FastMCP(
     name="Snowball MCP",
@@ -119,8 +247,14 @@ mcp = FastMCP(
 - 北向资金：northbound_shareholding_sh, northbound_shareholding_sz
 - 搜索股票：suggest_stock
 
+## 无需登录的功能
+- suggest_stock（股票搜索）
+- quotec（基础行情）
+- pankou（盘口数据）
+
 ## 注意事项
 - 使用前需确保 XUEQIU_TOKEN 环境变量已正确设置
+- 支持多 Token 配置：XUEQIU_TOKEN=token1,token2 或 XUEQIU_TOKEN_1, XUEQIU_TOKEN_2
 - 数据来源于雪球，仅供参考，不构成投资建议
 """
 )
@@ -168,37 +302,55 @@ def process_data(data, process_config=None):
     if process_config.get('convert_timestamps', True):
         data = convert_timestamps(data)
     
-    # 在这里可以添加更多的数据处理逻辑
-    # 例如:
-    # if 'format_numbers' in process_config:
-    #     data = format_numbers(data, **process_config['format_numbers'])
-    
     return data
 
 
+# ==================== 无需 Token 的工具（放在最前面）====================
+
 @mcp.tool()
-def quotec(stock_code: str="SZ000002") -> dict:
-    """获取某支股票的行情数据"""
+def suggest_stock(keyword: str = "茅台") -> dict:
+    """【无需登录】关键词搜索股票代码
+    
+    Args:
+        keyword: 搜索关键词，如股票名称、代码等
+    """
+    result = rate_limited_call(ball.suggest_stock, keyword)
+    return process_data(result)
+
+
+@mcp.tool()
+def quotec(stock_code: str = "SZ000002") -> dict:
+    """【无需登录】获取股票行情数据
+    
+    Args:
+        stock_code: 股票代码，如 SZ000002、SH600000
+    """
     result = rate_limited_call(ball.quotec, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def quote_detail(stock_code: str="SZ000002") -> dict:
-    """获取某支股票的行情数据-详细"""
+def pankou(stock_code: str = "SZ000002") -> dict:
+    """【无需登录】获取实时盘口数据，包含买卖五档报价
+    
+    Args:
+        stock_code: 股票代码
+    """
+    result = rate_limited_call(ball.pankou, stock_code)
+    return process_data(result)
+
+
+# ==================== 需要 Token 的工具 ====================
+
+@mcp.tool()
+def quote_detail(stock_code: str = "SZ000002") -> dict:
+    """获取股票行情详细数据"""
     result = rate_limited_call(ball.quote_detail, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def pankou(stock_code: str="SZ000002") -> dict:
-    """获取实时分笔数据，可以实时取得股票当前报价和成交信息"""
-    result = rate_limited_call(ball.pankou, stock_code)
-    return process_data(result)
-
-
-@mcp.tool()
-def kline(stock_code: str="SZ000002", period: str = "day", count: int = 284) -> dict:
+def kline(stock_code: str = "SZ000002", period: str = "day", count: int = 284) -> dict:
     """获取K线数据
     
     Args:
@@ -212,56 +364,56 @@ def kline(stock_code: str="SZ000002", period: str = "day", count: int = 284) -> 
 
 
 @mcp.tool()
-def earningforecast(stock_code: str="SZ000002") -> dict:
+def earningforecast(stock_code: str = "SZ000002") -> dict:
     """按年度获取业绩预告数据"""
     result = rate_limited_call(ball.earningforecast, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def report(stock_code: str="SZ000002") -> dict:
+def report(stock_code: str = "SZ000002") -> dict:
     """获取机构评级数据"""
     result = rate_limited_call(ball.report, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def capital_flow(stock_code: str="SZ000002") -> dict:
+def capital_flow(stock_code: str = "SZ000002") -> dict:
     """获取当日资金流如流出数据，每分钟数据"""
     result = rate_limited_call(ball.capital_flow, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def capital_history(stock_code: str="SZ000002") -> dict:
+def capital_history(stock_code: str = "SZ000002") -> dict:
     """获取历史资金流如流出数据，每日数据"""
     result = rate_limited_call(ball.capital_history, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def capital_assort(stock_code: str="SZ000002") -> dict:
+def capital_assort(stock_code: str = "SZ000002") -> dict:
     """获取资金成交分布数据"""
     result = rate_limited_call(ball.capital_assort, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def blocktrans(stock_code: str="SZ000002") -> dict:
+def blocktrans(stock_code: str = "SZ000002") -> dict:
     """获取大宗交易数据"""
     result = rate_limited_call(ball.blocktrans, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def margin(stock_code: str="SZ000002") -> dict:
+def margin(stock_code: str = "SZ000002") -> dict:
     """获取融资融券数据"""
     result = rate_limited_call(ball.margin, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def indicator(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) -> dict:
+def indicator(stock_code: str = "SZ000002", is_annals: int = 1, count: int = 5) -> dict:
     """按年度、季度获取业绩报表数据
     
     Args:
@@ -274,7 +426,7 @@ def indicator(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) ->
 
 
 @mcp.tool()
-def income(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) -> dict:
+def income(stock_code: str = "SZ000002", is_annals: int = 1, count: int = 5) -> dict:
     """获取利润表数据
     
     Args:
@@ -287,7 +439,7 @@ def income(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) -> di
 
 
 @mcp.tool()
-def balance(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) -> dict:
+def balance(stock_code: str = "SZ000002", is_annals: int = 1, count: int = 5) -> dict:
     """获取资产负债表数据
     
     Args:
@@ -300,7 +452,7 @@ def balance(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) -> d
 
 
 @mcp.tool()
-def cash_flow(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) -> dict:
+def cash_flow(stock_code: str = "SZ000002", is_annals: int = 1, count: int = 5) -> dict:
     """获取现金流量表数据
     
     Args:
@@ -313,7 +465,7 @@ def cash_flow(stock_code: str="SZ000002", is_annals: int = 1, count: int = 5) ->
 
 
 @mcp.tool()
-def business(stock_code: str="SZ000002", count: int = 5) -> dict:
+def business(stock_code: str = "SZ000002", count: int = 5) -> dict:
     """获取主营业务构成数据
     
     Args:
@@ -325,7 +477,7 @@ def business(stock_code: str="SZ000002", count: int = 5) -> dict:
 
 
 @mcp.tool()
-def top_holders(stock_code: str="SZ000002", circula: int = 1) -> dict:
+def top_holders(stock_code: str = "SZ000002", circula: int = 1) -> dict:
     """获取十大股东数据
     
     Args:
@@ -337,28 +489,28 @@ def top_holders(stock_code: str="SZ000002", circula: int = 1) -> dict:
 
 
 @mcp.tool()
-def main_indicator(stock_code: str="SZ000002") -> dict:
+def main_indicator(stock_code: str = "SZ000002") -> dict:
     """获取F10主要指标数据"""
     result = rate_limited_call(ball.main_indicator, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def holders(stock_code: str="SZ000002") -> dict:
+def holders(stock_code: str = "SZ000002") -> dict:
     """获取F10股东人数数据"""
     result = rate_limited_call(ball.holders, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def org_holding_change(stock_code: str="SZ000002") -> dict:
+def org_holding_change(stock_code: str = "SZ000002") -> dict:
     """获取F10机构持仓数据"""
     result = rate_limited_call(ball.org_holding_change, stock_code)
     return process_data(result)
 
 
 @mcp.tool()
-def bonus(stock_code: str="SZ000002", page: int = 1, size: int = 10) -> dict:
+def bonus(stock_code: str = "SZ000002", page: int = 1, size: int = 10) -> dict:
     """获取F10分红融资数据
     
     Args:
@@ -371,7 +523,7 @@ def bonus(stock_code: str="SZ000002", page: int = 1, size: int = 10) -> dict:
 
 
 @mcp.tool()
-def industry_compare(stock_code: str="SZ000002") -> dict:
+def industry_compare(stock_code: str = "SZ000002") -> dict:
     """获取F10行业对比数据"""
     result = rate_limited_call(ball.industry_compare, stock_code)
     return process_data(result)
@@ -396,7 +548,7 @@ def watch_stock(pid: int) -> dict:
 
 
 @mcp.tool()
-def nav_daily(cube_symbol: str="SZ000002") -> dict:
+def nav_daily(cube_symbol: str = "SZ000002") -> dict:
     """获取组合净值数据
     
     Args:
@@ -407,7 +559,7 @@ def nav_daily(cube_symbol: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def rebalancing_history(cube_symbol: str="SZ000002") -> dict:
+def rebalancing_history(cube_symbol: str = "SZ000002") -> dict:
     """获取组合历史交易信息
     
     Args:
@@ -430,7 +582,7 @@ def convertible_bond(page_size: int = 5, page_count: int = 1) -> dict:
 
 
 @mcp.tool()
-def index_basic_info(index_code: str="SZ000002") -> dict:
+def index_basic_info(index_code: str = "SZ000002") -> dict:
     """获取指数基本信息
     
     Args:
@@ -441,7 +593,7 @@ def index_basic_info(index_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def index_details_data(index_code: str="SZ000002") -> dict:
+def index_details_data(index_code: str = "SZ000002") -> dict:
     """获取指数详细信息
     
     Args:
@@ -452,7 +604,7 @@ def index_details_data(index_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def index_weight_top10(index_code: str="SZ000002") -> dict:
+def index_weight_top10(index_code: str = "SZ000002") -> dict:
     """获取指数权重股前十
     
     Args:
@@ -463,7 +615,7 @@ def index_weight_top10(index_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def index_perf_7(index_code: str="SZ000002") -> dict:
+def index_perf_7(index_code: str = "SZ000002") -> dict:
     """获取指数最近7天收益数据
     
     Args:
@@ -474,7 +626,7 @@ def index_perf_7(index_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def index_perf_30(index_code: str="SZ000002") -> dict:
+def index_perf_30(index_code: str = "SZ000002") -> dict:
     """获取指数最近30天收益数据
     
     Args:
@@ -485,7 +637,7 @@ def index_perf_30(index_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def index_perf_90(index_code: str="SZ000002") -> dict:
+def index_perf_90(index_code: str = "SZ000002") -> dict:
     """获取指数最近90天收益数据
     
     Args:
@@ -529,7 +681,7 @@ def fund_detail(fund_code: str) -> dict:
 
 
 @mcp.tool()
-def fund_info(fund_code: str="SZ000002") -> dict:
+def fund_info(fund_code: str = "SZ000002") -> dict:
     """获取基金基本信息
     
     Args:
@@ -540,7 +692,7 @@ def fund_info(fund_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def fund_growth(fund_code: str="SZ000002") -> dict:
+def fund_growth(fund_code: str = "SZ000002") -> dict:
     """获取基金增长数据
     
     Args:
@@ -551,7 +703,7 @@ def fund_growth(fund_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def fund_nav_history(fund_code: str="SZ000002") -> dict:
+def fund_nav_history(fund_code: str = "SZ000002") -> dict:
     """获取基金历史净值数据
     
     Args:
@@ -562,7 +714,7 @@ def fund_nav_history(fund_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def fund_achievement(fund_code: str="SZ000002") -> dict:
+def fund_achievement(fund_code: str = "SZ000002") -> dict:
     """获取基金业绩表现数据
     
     Args:
@@ -573,7 +725,7 @@ def fund_achievement(fund_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def fund_asset(fund_code: str="SZ000002") -> dict:
+def fund_asset(fund_code: str = "SZ000002") -> dict:
     """获取基金资产配置数据
     
     Args:
@@ -584,7 +736,7 @@ def fund_asset(fund_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def fund_manager(fund_code: str="SZ000002") -> dict:
+def fund_manager(fund_code: str = "SZ000002") -> dict:
     """获取基金经理信息
     
     Args:
@@ -595,7 +747,7 @@ def fund_manager(fund_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def fund_trade_date(fund_code: str="SZ000002") -> dict:
+def fund_trade_date(fund_code: str = "SZ000002") -> dict:
     """获取基金交易日期信息
     
     Args:
@@ -606,22 +758,11 @@ def fund_trade_date(fund_code: str="SZ000002") -> dict:
 
 
 @mcp.tool()
-def fund_derived(fund_code: str="SZ000002") -> dict:
+def fund_derived(fund_code: str = "SZ000002") -> dict:
     """获取基金衍生数据
     
     Args:
         fund_code: 基金代码
     """
     result = rate_limited_call(ball.fund_derived, fund_code)
-    return process_data(result)
-
-
-@mcp.tool()
-def suggest_stock(keyword: str="SZ000002") -> dict:
-    """关键词搜索股票代码
-    
-    Args:
-        keyword: 关键词
-    """
-    result = rate_limited_call(ball.suggest_stock, keyword)
     return process_data(result)

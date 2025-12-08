@@ -59,6 +59,22 @@ snowball-mcp
 
 关于如何获取雪球token，请参考[pysnowball文档](https://github.com/uname-yang/pysnowball/blob/master/how_to_get_token.md)。
 
+### 多 Token 配置（可选）
+
+为了分散请求压力、减少限流错误，支持配置多个 Token：
+
+```bash
+# 方式一：逗号分隔
+XUEQIU_TOKEN="token1,token2,token3"
+
+# 方式二：多个环境变量
+XUEQIU_TOKEN_1="token1"
+XUEQIU_TOKEN_2="token2"
+XUEQIU_TOKEN_3="token3"
+```
+
+多 Token 会自动轮换使用，当某个 Token 连续失败时会临时禁用并切换到下一个。
+
 ## 功能特性
 
 - 获取股票实时行情
@@ -72,6 +88,13 @@ snowball-mcp
 - 融资融券数据
 - 大宗交易数据
 - 机构评级和持仓数据
+
+### 无需登录的功能
+
+以下功能无需配置 Token 即可使用：
+- `suggest_stock` - 股票搜索
+- `quotec` - 基础行情
+- `pankou` - 盘口数据
 
 ## 展示图
 
