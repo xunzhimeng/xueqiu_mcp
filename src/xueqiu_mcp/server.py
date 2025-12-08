@@ -15,16 +15,21 @@ if _token:
     ball.set_token(_token)
 
 
-# 请求频率限制器，防止被雪球服务器限流
-class RateLimiter:
-    """简单的请求频率限制器，确保请求之间有最小间隔"""
+# 自适应请求频率限制器
+class AdaptiveRateLimiter:
+    """自适应请求频率限制器
     
-    def __init__(self, min_interval: float = 1.0):
-        """
-        Args:
-            min_interval: 请求之间的最小间隔（秒）
-        """
+    机制：
+    1. 初始间隔为 min_interval (默认1.0s)
+    2. 遇到错误时，调用 backoff() 增加间隔 (x1.2)，最大不超过 max_interval (5.0s)
+    3. 如果一段时间 (recovery_timeout) 没有请求，自动恢复到 min_interval
+    """
+    
+    def __init__(self, min_interval: float = 1.0, max_interval: float = 5.0, recovery_timeout: float = 30.0):
         self.min_interval = min_interval
+        self.max_interval = max_interval
+        self.current_interval = min_interval
+        self.recovery_timeout = recovery_timeout
         self.last_request_time = 0.0
         self._lock = threading.Lock()
     
@@ -32,20 +37,68 @@ class RateLimiter:
         """等待直到可以发起下一个请求"""
         with self._lock:
             current_time = time.time()
-            elapsed = current_time - self.last_request_time
-            if elapsed < self.min_interval:
-                time.sleep(self.min_interval - elapsed)
+            time_since_last = current_time - self.last_request_time
+            
+            # 如果距离上次请求已经过了恢复期，重置限制
+            if time_since_last > self.recovery_timeout:
+                self.current_interval = self.min_interval
+            
+            # 计算需要等待的时间
+            # 注意：这里的 elapsed 应该基于 interval 计算
+            if time_since_last < self.current_interval:
+                sleep_time = self.current_interval - time_since_last
+                time.sleep(sleep_time)
+            
             self.last_request_time = time.time()
 
+    def backoff(self):
+        """触发退避机制，增加等待间隔"""
+        with self._lock:
+            self.current_interval = min(self.current_interval * 1.2, self.max_interval)
+            print(f"[RateLimit] 触发限流退避，当前间隔: {self.current_interval:.2f}s")
 
-# 全局限流器，每次请求间隔至少 1.5 秒
-_rate_limiter = RateLimiter(min_interval=1.5)
+
+# 全局自适应限流器
+_rate_limiter = AdaptiveRateLimiter(min_interval=1.0, max_interval=5.0, recovery_timeout=30.0)
 
 
 def rate_limited_call(func, *args, **kwargs):
-    """带限流的 API 调用包装函数"""
+    """带限流的 API 调用包装函数，包含错误处理、自适应退避和自动重试"""
     _rate_limiter.wait()
-    return func(*args, **kwargs)
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        # 遇到异常，触发退避
+        _rate_limiter.backoff()
+        
+        # 打印日志（可选）
+        print(f"[Retry] 请求失败: {e}，将在 2 秒后重试...")
+        
+        # 重试机制：等待 2 秒后重试一次
+        time.sleep(2.0)
+        try:
+            # 重试前再次检查限流（虽然 sleep 2s 已经足够，但为了保持逻辑一致性，且避免重试请求冲击）
+            # 或者这里可以直接调用，因为已经手动 sleep 了 2s，且触发了 backoff
+            return func(*args, **kwargs)
+        except Exception as retry_e:
+            # 重试依然失败，处理异常
+            e = retry_e # 使用最后一次的异常
+            
+            # 处理 pysnowball 抛出的异常，通常是 bytes 类型的响应内容
+            if hasattr(e, 'args') and e.args and isinstance(e.args[0], bytes):
+                try:
+                    error_data = json.loads(e.args[0].decode('utf-8'))
+                    # 检查是否是 token 失效错误 (400016)
+                    if error_data.get('error_code') == '400016' or \
+                       '重新登录' in error_data.get('error_description', ''):
+                        raise ValueError(
+                            "Snowball API Token 已失效或过期。\n"
+                            "请重新获取新的 Token 并更新 XUEQIU_TOKEN 环境变量。\n"
+                            "获取方法请参考: https://github.com/uname-yang/pysnowball/blob/master/how_to_get_token.md"
+                        )
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+            raise e
 
 mcp = FastMCP(
     name="Snowball MCP",
