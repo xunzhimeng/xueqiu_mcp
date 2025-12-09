@@ -482,12 +482,16 @@ def simplify_financial_indicator(data):
 
 
 def simplify_income_data(data):
-    """精简利润表数据，使用紧凑的二维数组格式，金额用亿元"""
+    """精简利润表数据，使用紧凑的二维数组格式，金额用亿元
+    
+    包含字段：报告期、营业收入、收入同比、净利润、净利润同比、扣非净利润、扣非同比、营业利润、营业利润同比
+    """
     if not data or 'data' not in data:
         return data
     
     inner = data.get('data', {})
-    columns = ['report', 'revenue(亿)', 'rev_yoy%', 'profit(亿)', 'profit_yoy%', 'op(亿)']
+    columns = ['report', 'revenue(亿)', 'rev_yoy%', 'profit(亿)', 'profit_yoy%', 
+               'deducted(亿)', 'deducted_yoy%', 'op(亿)', 'op_yoy%']
     rows = []
     
     for item in inner.get('list', []):
@@ -497,13 +501,20 @@ def simplify_income_data(data):
                 return v[idx]
             return v if idx == 0 else None
         
+        def to_pct(val):
+            """将小数转换为百分比"""
+            return round(val * 100, 2) if val is not None else None
+        
         rows.append([
             item.get('report_name'),
-            format_number(get_val('total_revenue', 0), 'yi'),
-            round(get_val('total_revenue', 1) * 100, 2) if get_val('total_revenue', 1) else None,  # 转百分比
-            format_number(get_val('net_profit', 0), 'yi'),
-            round(get_val('net_profit', 1) * 100, 2) if get_val('net_profit', 1) else None,
-            format_number(get_val('op', 0), 'yi'),
+            format_number(get_val('total_revenue', 0), 'yi'),  # 营业收入
+            to_pct(get_val('total_revenue', 1)),  # 收入同比
+            format_number(get_val('net_profit', 0), 'yi'),  # 净利润
+            to_pct(get_val('net_profit', 1)),  # 净利润同比
+            format_number(get_val('net_profit_atsopc', 0), 'yi'),  # 扣非净利润(归母)
+            to_pct(get_val('net_profit_atsopc', 1)),  # 扣非同比
+            format_number(get_val('op', 0), 'yi'),  # 营业利润
+            to_pct(get_val('op', 1)),  # 营业利润同比
         ])
     
     return {
@@ -515,24 +526,39 @@ def simplify_income_data(data):
 
 
 def simplify_balance_data(data):
-    """精简资产负债表数据，使用紧凑的二维数组格式，金额用亿元"""
+    """精简资产负债表数据，使用紧凑的二维数组格式，金额用亿元
+    
+    包含字段：报告期、总资产、资产同比、总负债、负债同比、股东权益、资产负债率
+    """
     if not data or 'data' not in data:
         return data
     
     inner = data.get('data', {})
-    columns = ['report', 'assets(亿)', 'liab(亿)', 'liab_ratio%']
+    columns = ['report', 'assets(亿)', 'assets_yoy%', 'liab(亿)', 'liab_yoy%', 'equity(亿)', 'liab_ratio%']
     rows = []
     
     for item in inner.get('list', []):
-        def get_val(key):
+        def get_val(key, idx=0):
             v = item.get(key)
-            return v[0] if isinstance(v, list) and v else v
+            if isinstance(v, list) and len(v) > idx:
+                return v[idx]
+            return v if idx == 0 else None
+        
+        def to_pct(val):
+            return round(val * 100, 2) if val is not None else None
+        
+        total_assets = get_val('total_assets', 0)
+        total_liab = get_val('total_liab', 0)
+        equity = (total_assets - total_liab) if total_assets and total_liab else None
         
         rows.append([
             item.get('report_name'),
-            format_number(get_val('total_assets'), 'yi'),
-            format_number(get_val('total_liab'), 'yi'),
-            round(get_val('asset_liab_ratio') * 100, 2) if get_val('asset_liab_ratio') else None,
+            format_number(total_assets, 'yi'),  # 总资产
+            to_pct(get_val('total_assets', 1)),  # 资产同比
+            format_number(total_liab, 'yi'),  # 总负债
+            to_pct(get_val('total_liab', 1)),  # 负债同比
+            format_number(equity, 'yi'),  # 股东权益
+            to_pct(get_val('asset_liab_ratio', 0)),  # 资产负债率
         ])
     
     return {
@@ -544,24 +570,35 @@ def simplify_balance_data(data):
 
 
 def simplify_cashflow_data(data):
-    """精简现金流量表数据，使用紧凑的二维数组格式，金额用亿元"""
+    """精简现金流量表数据，使用紧凑的二维数组格式，金额用亿元
+    
+    包含字段：报告期、经营现金流、经营同比、投资现金流、投资同比、筹资现金流、筹资同比
+    """
     if not data or 'data' not in data:
         return data
     
     inner = data.get('data', {})
-    columns = ['report', 'cf_operating(亿)', 'cf_investing(亿)', 'cf_financing(亿)']
+    columns = ['report', 'cf_op(亿)', 'cf_op_yoy%', 'cf_inv(亿)', 'cf_inv_yoy%', 'cf_fin(亿)', 'cf_fin_yoy%']
     rows = []
     
     for item in inner.get('list', []):
-        def get_val(key):
+        def get_val(key, idx=0):
             v = item.get(key)
-            return v[0] if isinstance(v, list) and v else v
+            if isinstance(v, list) and len(v) > idx:
+                return v[idx]
+            return v if idx == 0 else None
+        
+        def to_pct(val):
+            return round(val * 100, 2) if val is not None else None
         
         rows.append([
             item.get('report_name'),
-            format_number(get_val('ncf_from_oa'), 'yi'),
-            format_number(get_val('ncf_from_ia'), 'yi'),
-            format_number(get_val('ncf_from_fa'), 'yi'),
+            format_number(get_val('ncf_from_oa', 0), 'yi'),  # 经营活动现金流
+            to_pct(get_val('ncf_from_oa', 1)),  # 经营同比
+            format_number(get_val('ncf_from_ia', 0), 'yi'),  # 投资活动现金流
+            to_pct(get_val('ncf_from_ia', 1)),  # 投资同比
+            format_number(get_val('ncf_from_fa', 0), 'yi'),  # 筹资活动现金流
+            to_pct(get_val('ncf_from_fa', 1)),  # 筹资同比
         ])
     
     return {
