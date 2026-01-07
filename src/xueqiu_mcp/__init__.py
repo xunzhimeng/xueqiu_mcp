@@ -2,7 +2,7 @@
 
 from xueqiu_mcp.server import mcp
 
-__version__ = "0.2.0"
+__version__ = "0.2.8"
 
 
 def main():
