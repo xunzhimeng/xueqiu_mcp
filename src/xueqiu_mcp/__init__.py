@@ -7,4 +7,4 @@ __version__ = "0.2.0"
 
 def main():
     """MCP 服务入口函数"""
-    mcp.run()
+    mcp.run(show_banner=False)

@@ -228,6 +228,8 @@ def rate_limited_call(func, *args, **kwargs):
             raise e
 
 
+#- 北向资金：northbound_shareholding_sh, northbound_shareholding_sz
+
 mcp = FastMCP(
     name="Snowball MCP",
     instructions="""你是一个中国股票市场数据助手，通过雪球(Xueqiu/Snowball)API获取股票、基金、指数等金融数据。
@@ -244,7 +246,6 @@ mcp = FastMCP(
 - 资金流向：capital_flow, capital_history
 - 指数数据：index_basic_info, index_weight_top10
 - 基金数据：fund_detail, fund_nav_history
-- 北向资金：northbound_shareholding_sh, northbound_shareholding_sz
 - 搜索股票：suggest_stock
 
 ## 无需登录的功能
@@ -1127,6 +1128,102 @@ def simplify_convertible_bond(data):
     }
 
 
+def simplify_northbound_shareholding(data, limit: int = 50):
+    """精简北向持股数据，限制返回数量并包装为 dict 格式
+    
+    解决问题：
+    1. 原始数据可能是 list，MCP 要求返回 dict
+    2. 数据量过大会导致 LLM 上下文溢出
+    
+    Args:
+        data: 原始数据（可能是 list 或 dict）
+        limit: 最大返回条数，默认 50
+    
+    Returns:
+        dict 格式的精简数据
+    """
+    if data is None:
+        return {"data": [], "count": 0, "error_code": 0}
+    
+    # 处理 list 格式（API 直接返回列表）
+    if isinstance(data, list):
+        total_count = len(data)
+        simplified = []
+        
+        for item in data[:limit]:
+            if isinstance(item, dict):
+                # 只保留关键字段
+                simplified.append({
+                    'symbol': item.get('symbol'),
+                    'name': item.get('name'),
+                    'holding(亿)': format_number(item.get('holding_amount'), 'yi'),
+                    'ratio%': item.get('holding_ratio'),
+                    'chg(万)': format_number(item.get('chg_amount'), 'wan'),
+                    'date': item.get('chg_date'),
+                })
+            else:
+                simplified.append(item)
+        
+        return {
+            "columns": ['symbol', 'name', 'holding(亿)', 'ratio%', 'chg(万)', 'date'],
+            "data": simplified,
+            "count": total_count,
+            "limit": limit,
+            "truncated": total_count > limit,
+            "error_code": 0
+        }
+    
+    # 处理 dict 格式（API 返回包装过的数据）
+    if isinstance(data, dict):
+        # 如果已经有 data 字段，递归处理
+        if 'data' in data and isinstance(data['data'], list):
+            inner_result = simplify_northbound_shareholding(data['data'], limit)
+            inner_result['error_code'] = data.get('error_code', 0)
+            return inner_result
+        return data
+    
+    # 其他类型，包装成 dict
+    return {"data": data, "count": 1, "error_code": 0}
+
+
+def ensure_dict_format(data, limit: int = 100):
+    """确保数据返回 dict 格式，防止 MCP 工具返回 list 导致错误
+    
+    用于处理那些原始 API 可能返回 list 的接口，确保符合 MCP 规范。
+    同时限制数据量防止上下文溢出。
+    
+    Args:
+        data: 原始数据
+        limit: 最大返回条数（仅对 list 生效）
+    
+    Returns:
+        dict 格式数据
+    """
+    if data is None:
+        return {"data": None, "error_code": 0}
+    
+    if isinstance(data, list):
+        total = len(data)
+        return {
+            "data": data[:limit],
+            "count": total,
+            "limit": limit,
+            "truncated": total > limit,
+            "error_code": 0
+        }
+    
+    if isinstance(data, dict):
+        # 检查内部是否有过大的 list
+        for key, value in data.items():
+            if isinstance(value, list) and len(value) > limit:
+                data[key] = value[:limit]
+                data[f'{key}_count'] = len(value)
+                data[f'{key}_truncated'] = True
+        return data
+    
+    return {"data": data, "error_code": 0}
+
+
 def process_data(data, process_config=None):
     """
     通用数据处理函数，可扩展添加各种数据处理操作
@@ -1201,6 +1298,15 @@ def process_data(data, process_config=None):
         data = simplify_fund_nav_history(data)
     elif simplify_type == 'convertible_bond':
         data = simplify_convertible_bond(data)
+    elif simplify_type == 'northbound_shareholding':
+        limit = process_config.get('limit', 50)
+        data = simplify_northbound_shareholding(data, limit)
+    
+    # 确保返回 dict 格式（防止 MCP 工具返回 list 导致错误）
+    # 默认开启，可通过 ensure_dict=False 关闭
+    if process_config.get('ensure_dict', True):
+        limit = process_config.get('limit', 100)
+        data = ensure_dict_format(data, limit)
     
     return data
 
@@ -1547,26 +1653,28 @@ def index_perf_90(index_code: str = "SZ000002") -> dict:
     return process_data(result)
 
 
-@mcp.tool()
-def northbound_shareholding_sh(date: str = None) -> dict:
-    """获取深港通北向数据
+# @mcp.tool()
+# def northbound_shareholding_sh(date: str = None, limit: int = 50) -> dict:
+#     """获取深港通北向数据
     
-    Args:
-        date: 日期，默认当天，格式：'2022/01/19'
-    """
-    result = rate_limited_call(ball.northbound_shareholding_sh, date)
-    return process_data(result)
+#     Args:
+#         date: 日期，默认当天，格式：'2022/01/19'
+#         limit: 最大返回条数，默认50条（避免数据过大）
+#     """
+#     result = rate_limited_call(ball.northbound_shareholding_sh, date)
+#     return process_data(result, {'simplify': 'northbound_shareholding', 'limit': limit})
 
 
-@mcp.tool()
-def northbound_shareholding_sz(date: str = None) -> dict:
-    """获取沪港通北向数据
+# @mcp.tool()
+# def northbound_shareholding_sz(date: str = None, limit: int = 50) -> dict:
+#     """获取沪港通北向数据
     
-    Args:
-        date: 日期，默认当天，格式：'2022/01/19'
-    """
-    result = rate_limited_call(ball.northbound_shareholding_sz, date)
-    return process_data(result)
+#     Args:
+#         date: 日期，默认当天，格式：'2022/01/19'
+#         limit: 最大返回条数，默认50条（避免数据过大）
+#     """
+#     result = rate_limited_call(ball.northbound_shareholding_sz, date)
+#     return process_data(result, {'simplify': 'northbound_shareholding', 'limit': limit})
 
 
 @mcp.tool()
